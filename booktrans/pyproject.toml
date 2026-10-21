@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "booktrans"
+version = "0.1.2"
+description = "Offline English PDF to Korean translator (layout-preserving and bilingual output)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only (combined distribution with PyMuPDF); BookTrans original source code also under MIT (LICENSE-MIT)" }
+dependencies = [
+    "pymupdf==1.28.2",
+    "ctranslate2==4.8.3",
+    "sentencepiece==0.2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pyinstaller==6.22.3"]
+
+[project.scripts]
+booktrans = "booktrans.cli:main"
+
+[project.gui-scripts]
+booktrans-gui = "booktrans.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
