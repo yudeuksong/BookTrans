@@ -1,0 +1,11 @@
+# Direct dependencies for building and testing BookTrans on Windows. Lock with:
+#   uv pip compile --universal --python-version 3.12 --generate-hashes --no-header packaging/requirements.in -o packaging/requirements-lock.txt
+# ctranslate2 is NOT installed from PyPI for the Windows build: its PyPI wheel links Intel
+# MKL/OpenMP. packaging/build_ctranslate2_cpu.ps1 builds a CPU-only wheel from source
+# (numpy and pyyaml below are its runtime dependencies).
+pymupdf==1.28.2
+sentencepiece==0.2.2
+numpy==2.5.4
+pyyaml==6.0.3
+pyinstaller==6.22.3
+pytest==9.1.1

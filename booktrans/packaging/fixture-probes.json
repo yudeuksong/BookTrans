@@ -1,0 +1,11 @@
+[
+  {"source": "YOU MUST BE BORN AGAIN", "meaning": "명령: 거듭나야 한다", "require": ["거듭나|다시 태어나|새로 태어나", "야|하라|십시오"], "forbid": ["찾아|AGAIN|again"]},
+  {"source": "CONTENTS", "meaning": "목차", "require": ["목차|차례"], "forbid": ["관련 기사"]},
+  {"source": "PROBLEM", "meaning": "문제", "require": ["문제"], "forbid": ["계정"]},
+  {"source": "The eighteenth century was a time of great change", "meaning": "18세기, 변화", "require": ["18|십팔", "세기", "변화"]},
+  {"source": "In 1750 there were twenty-one printing houses", "meaning": "1750년, 21곳, 인쇄소", "require": ["1750", "21|스물\\s?한|이십일", "인쇄"]},
+  {"source": "Not only can your heart be changed, but your whole life can be renewed.", "meaning": "긍정: 마음이 바뀔 뿐 아니라 삶 전체도 새로워진다", "require": ["마음", "삶|인생|생애", "뿐(만)?\\s?아니라|만이\\s?아니라|만\\s?아니라"], "forbid": ["없(다|습니다|고|어|지만)|않(는다|습니다|고|아|지만)|못(한다|합니다|하지만)"]},
+  {"source": "Readers did not accept every argument they found", "meaning": "부정 서술어 유지", "require": ["독자", "주장|논증|논거|논쟁", "않|못|없|아니"]},
+  {"source": "The second edition appeared in 1762 with three new chapters.", "meaning": "1762년, 새 장 3개", "require": ["1762", "3|세\\s|셋", "판"]},
+  {"source": "Can a person change without help from others?", "meaning": "의문문, 도움 없이", "require": ["도움", "없이|않고", "\\?|까"]}
+]

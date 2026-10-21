@@ -1,0 +1,10 @@
+# Model packaging in CI only (packaging/build_m2m100_model.py, check_m2m100_engine.py); never shipped.
+# The pinned output hash (models.MODEL_SHA256) is the real guard: a different toolchain that
+# changes the converted bytes fails the build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+transformers==5.20.2
+huggingface-hub==2.2.0
+safetensors==0.8.0
+tokenizers==0.23.3
+protobuf==7.36.2

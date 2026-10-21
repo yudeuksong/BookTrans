@@ -1,0 +1,2 @@
+# Linux test job only (never shipped): the PyPI ctranslate2 wheel, pinned by hash.
+ctranslate2==4.8.3
