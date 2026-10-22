@@ -1,0 +1,541 @@
+name: BookTrans release build
+
+# Builds and tests BookTrans from this repository's source (model package, Linux tests,
+# Windows exe with fresh-install, official-download and offline-container tests, installer,
+# portable/source/third-party ZIPs) and, if every job passes and `publish` is set, replaces
+# the files of the release named in `tag`. Translation quality is reported in its own job and
+# does not block publishing; the release notes state the known quality limits.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose files are replaced
+        default: v0.1.2
+        required: true
+      publish:
+        description: Replace the release files after all builds and tests pass
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: booktrans-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: booktrans
+    shell: bash  # Linux steps: bash -eo pipefail (Windows steps set pwsh explicitly)
+
+jobs:
+  # The translation model package: quickmt/quickmt-en-ko at the pinned revision, repacked
+  # reproducibly (two packings must match), checked against the official quickmt library,
+  # and required to match models.MODEL_SHA256. Cached across runs; never shipped in the app.
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    env:
+      MODEL_FILE: booktrans-model-quickmt-en-ko.zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - run: pip install --require-hashes -r packaging/requirements-lock.txt
+      - run: pip install --require-hashes --no-deps -r packaging/requirements-test-ct2.txt
+      - run: pip install --no-deps -e .
+      - name: Model cache key
+        id: key
+        run: |
+          python -c "from booktrans.models import MODEL_FILE; import os, sys; sys.exit(MODEL_FILE != os.environ['MODEL_FILE'])"
+          rev=$(python -c "from booktrans.models import MODEL_REVISION; print(MODEL_REVISION)")
+          echo "key=booktrans-model-quickmt-en-ko-$rev-${{ hashFiles('booktrans/packaging/build_quickmt_model.py', 'booktrans/packaging/requirements-model-build.txt', 'booktrans/packaging/archive_tree.py', 'booktrans/src/booktrans/models.py', 'booktrans/src/booktrans/engine.py') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore model package
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: booktrans/model-archive
+          key: ${{ steps.key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: Model build tools (CI only)
+        run: |
+          pip install -r packaging/requirements-model-build.txt
+          pip freeze | grep -iE "^(quickmt|ctranslate2|sentencepiece|huggingface.hub)"
+      - name: Pack the model package twice (must be byte-identical)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p evidence
+          python packaging/build_quickmt_model.py /tmp/qmt-work "model-archive/$MODEL_FILE" --twice | tee evidence/model-build.txt
+      - name: Save model package
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: booktrans/model-archive
+          key: ${{ steps.key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: BookTrans's quickmt path vs the official quickmt library
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p evidence
+          python packaging/check_quickmt_engine.py "model-archive/$MODEL_FILE" evidence/quickmt-check.json | tee evidence/quickmt-check.txt
+      - name: Model license on the Hub is CC-BY-4.0 (as ATTRIBUTION.txt states)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p evidence
+          rev=$(python -c "from booktrans.models import MODEL_REVISION; print(MODEL_REVISION)")
+          curl -fsSL "https://huggingface.co/api/models/quickmt/quickmt-en-ko/revision/$rev" > evidence/quickmt-en-ko-hub.json
+          python -c "import json,sys; d=json.load(open('evidence/quickmt-en-ko-hub.json')); lic=(d.get('cardData') or {}).get('license'); tags=[t for t in d.get('tags',[]) if t.startswith('license:')]; print('cardData.license:', lic, 'tags:', tags); sys.exit(0 if lic == 'cc-by-4.0' else 1)"
+      - name: Package matches the pinned SHA-256
+        if: ${{ !cancelled() }}
+        run: |
+          ls -l model-archive
+          actual=$(sha256sum "model-archive/$MODEL_FILE" | cut -d' ' -f1)
+          pinned=$(python -c "from booktrans.models import MODEL_SHA256; print(MODEL_SHA256)")
+          echo "built  $actual"
+          echo "pinned $pinned"
+          test "$actual" = "$pinned"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BookTrans-model-package-evidence
+          if-no-files-found: ignore
+          path: booktrans/evidence/
+      # The model file a tester installs with "모델 파일 설치…" / --install-model (private, short-lived).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BookTrans-model-quickmt-en-ko
+          path: booktrans/model-archive/${{ env.MODEL_FILE }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+
+  test:
+    needs: model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - run: pip install --require-hashes -r packaging/requirements-lock.txt
+      - name: PyPI ctranslate2 (Linux tests only; the Windows app uses a CPU-only source build)
+        run: pip install --require-hashes --no-deps -r packaging/requirements-test-ct2.txt
+      - run: pip install --no-deps -e .
+      - name: Restore model package
+        uses: actions/cache/restore@v4
+        with:
+          path: booktrans/model-archive
+          key: ${{ needs.model.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Install the model package (verifies the pinned SHA-256)
+        run: python packaging/fetch_model.py --archive model-archive/booktrans-model-quickmt-en-ko.zip models
+      - name: Unit + real-model tests
+        env:
+          BOOKTRANS_MODEL: ${{ github.workspace }}/booktrans/models
+        run: python -m pytest -v -s
+
+  windows-installer:
+    needs: [model, test]
+    # windows-2022: Docker with process-isolated servercore:ltsc2022 for the clean-system test.
+    runs-on: windows-2022
+    env:
+      # Windows runners default Python's stdio to cp1252, which cannot print Korean.
+      # Applies to plain python processes; the frozen exe writes its own UTF-8 log.
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes -r packaging/requirements-lock.txt
+          if ($LASTEXITCODE -ne 0) { throw "locked install failed" }
+          python -m pip install --no-deps -e .
+          if ($LASTEXITCODE -ne 0) { throw "editable install failed" }
+      - name: Restore CPU-only CTranslate2 build
+        id: ct2cache
+        uses: actions/cache/restore@v4
+        with:
+          path: booktrans/ct2-dist
+          key: ct2-4.8.3-cpu-onednn-3.1.1-py3.12.10-${{ hashFiles('booktrans/packaging/build_ctranslate2_cpu.ps1', 'booktrans/packaging/archive_tree.py') }}
+      - name: Build CPU-only CTranslate2 4.8.3 from source (oneDNN, no MKL/CUDA/cuDNN)
+        if: steps.ct2cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        timeout-minutes: 90
+        run: ./packaging/build_ctranslate2_cpu.ps1 -Out ct2-dist
+      # Save immediately, so a failure in a later step does not discard a long build.
+      - name: Save CPU-only CTranslate2 build
+        if: steps.ct2cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: booktrans/ct2-dist
+          key: ${{ steps.ct2cache.outputs.cache-primary-key }}
+      - name: Install the CPU-only CTranslate2 wheel
+        shell: pwsh
+        run: |
+          Get-Content ct2-dist/BUILD_INFO.txt, ct2-dist/SUBMODULES.txt
+          $whl = Get-ChildItem ct2-dist/ctranslate2-4.8.3-*.whl
+          Get-FileHash $whl -Algorithm SHA256 | Format-List
+          python -m pip install --no-deps $whl.FullName
+          if ($LASTEXITCODE -ne 0) { throw "ctranslate2 wheel install failed" }
+          python -c "import ctranslate2; print('ctranslate2', ctranslate2.__version__, 'CPU compute types:', ctranslate2.get_supported_compute_types('cpu'))"
+          if ($LASTEXITCODE -ne 0) { throw "ctranslate2 import failed" }
+      - name: Unit tests on Windows (no model)
+        run: python -m pytest -v
+      - name: Build app (PyInstaller)
+        # vcomp140.dll (MSVC OpenMP, imported by the CPU-only ctranslate2.dll) is not part of a
+        # clean Windows install; ship it explicitly. The dependency check below verifies the rest.
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name BookTrans
+          --paths src --collect-all ctranslate2 --collect-all pymupdf
+          --collect-binaries sentencepiece
+          --add-binary "C:/Windows/System32/vcomp140.dll;."
+          packaging/launcher.py
+      - name: Native dependency check (app) and reference analysis of the PyPI ctranslate2 wheel
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          python -m pip download --require-hashes --no-deps --only-binary :all: -r packaging/requirements-test-ct2.txt -d pypi-ct2
+          if ($LASTEXITCODE -ne 0) { throw "reference wheel download failed" }
+          $ref = Get-ChildItem pypi-ct2/ctranslate2-*-win_amd64.whl
+          python packaging/check_pe_imports.py --dist dist/BookTrans --wheel $ref.FullName --wheel (Get-ChildItem ct2-dist/*.whl).FullName --report evidence/pe-imports.txt
+          if ($LASTEXITCODE -ne 0) { throw "unresolved native dependencies in the app folder" }
+      - name: Add licenses, notices and third-party sources
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE, LICENSE-MIT, README.md dist/BookTrans/
+          New-Item -ItemType Directory -Force third-party-src | Out-Null
+          Copy-Item ct2-dist/SUBMODULES.txt third-party-src/ctranslate2-SUBMODULES.txt
+          Copy-Item ct2-dist/BUILD_INFO.txt third-party-src/ctranslate2-BUILD_INFO.txt
+          Copy-Item packaging/build_ctranslate2_cpu.ps1 third-party-src/
+          # Diagnostic here (always writes notices and the manifest); the strict source/license
+          # check is the separate distribution-gate job, so exe tests still run when it would fail.
+          python packaging/collect_third_party.py --status-json third-party-src/GATE_STATUS.json --dist dist/BookTrans --sources third-party-src `
+            --zip dist/BookTrans-ThirdParty-Source-0.1.2.zip `
+            --local-source "ctranslate2=ct2-dist/ctranslate2-4.8.3-recursive-src.tar.gz" `
+            --extra "oneDNN|3.1.1|Apache-2.0|statically linked into ctranslate2.dll (CPU backend)|ct2-dist/oneDNN-3.1.1.tar.gz"
+          $code = $LASTEXITCODE
+          Get-Content third-party-src/SOURCES_MANIFEST.txt -Encoding utf8
+          if ($code -ne 0) { throw "third-party collection crashed ($code)" }
+          Get-Content third-party-src/GATE_STATUS.json -Encoding utf8
+      - name: Check the app folder ships no model or user data
+        shell: pwsh
+        run: |
+          $bad = Get-ChildItem -Recurse dist/BookTrans -File | Where-Object {
+            $_.Name -match '\.argosmodel$|^model\.bin$|^sentencepiece(\.bpe)?\.model$|\.spm\.model$|^booktrans-model.*\.zip$|\.sqlite3$|\.pdf$|\.log$' }
+          if ($bad) { $bad | ForEach-Object { $_.FullName }; throw "forbidden files in app folder" }
+          "app folder size: {0:N1} MB" -f ((Get-ChildItem -Recurse dist/BookTrans -File | Measure-Object Length -Sum).Sum / 1MB)
+      - name: Restore model package
+        uses: actions/cache/restore@v4
+        with:
+          path: booktrans/model-archive
+          key: ${{ needs.model.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Fresh-install tests of the built exe (consent, hash, failure, official download, file install, translate)
+        shell: pwsh
+        timeout-minutes: 20
+        env:
+          BOOKTRANS_HANG_SECONDS: "600"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Regression check: a plain Python process printing Korean into redirected stdout.
+          python -c "print('한글 출력 확인')" > utf8-check.txt
+          if ($LASTEXITCODE -ne 0) { throw "python could not print Korean to redirected stdout" }
+
+          # A brand-new user profile: no model, no cache.
+          $env:LOCALAPPDATA = Join-Path $PWD 'fresh-appdata'
+          New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
+          $models = Join-Path $env:LOCALAPPDATA 'BookTrans/models'
+          New-Item -ItemType Directory -Force smoke-logs | Out-Null
+
+          function Invoke-BookTrans([string]$name, [string[]]$arguments) {
+            $env:BOOKTRANS_LOG = "smoke-logs/$name.log"
+            $p = Start-Process -FilePath dist/BookTrans/BookTrans.exe -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+            # Write-Host only: anything else written here would become part of the return value.
+            Write-Host "---- $name (exit $($p.ExitCode)) ----"
+            Get-Content $env:BOOKTRANS_LOG -Encoding utf8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+            return $p.ExitCode
+          }
+          function Assert-NoModel([string]$when) {
+            if (Test-Path (Join-Path $models 'quickmt-en-ko')) { throw "model installed $when" }
+            $tmp = Get-ChildItem -Force $models -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.*' }
+            if ($tmp) { throw "temporary files left $when : $($tmp.Name -join ', ')" }
+          }
+
+          # Synthetic 3-page book (~85 text lines, no images): headings, TOC, columns, page-break paragraph.
+          python packaging/make_fixture.py smoke.pdf
+          if ($LASTEXITCODE -ne 0) { throw "failed to create the fixture" }
+
+          # 1. No model: translation must refuse, not download.
+          $code = Invoke-BookTrans 'no-model' @('smoke.pdf', '-o', 'smoke-out')
+          if ($code -ne 3) { throw "expected exit 3 without a model, got $code" }
+          Assert-NoModel 'without a model file'
+
+          # 3-5. The consent and integrity paths, with a local test mirror standing in for a location.
+          New-Item -ItemType Directory -Force fake-mirror | Out-Null
+          python -c "import zipfile; z=zipfile.ZipFile('fake-mirror/fake.zip','w'); z.writestr('x/model/model.bin', b'fake'); z.writestr('x/booktrans-model.json', b'{}'); z.close()"
+          if ($LASTEXITCODE -ne 0) { throw "failed to create fake model" }
+          $srv = Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory','fake-mirror' -PassThru -NoNewWindow
+          try {
+            Start-Sleep -Seconds 3
+            $env:BOOKTRANS_MODEL_URLS = 'http://127.0.0.1:8765/fake.zip'
+            # 3. Download request without consent (no --yes, no console): refused.
+            $code = Invoke-BookTrans 'no-consent' @('--download-model')
+            if ($code -ne 4) { throw "expected exit 4 without consent, got $code" }
+            Assert-NoModel 'without consent'
+
+            # 4. Wrong file from a mirror: hash check rejects it and nothing is installed.
+            $code = Invoke-BookTrans 'hash-mismatch' @('--download-model', '--yes')
+            if ($code -ne 5) { throw "expected exit 5 on hash mismatch, got $code" }
+            if (-not (Select-String -Path smoke-logs/hash-mismatch.log -Pattern 'sha|해시' -Quiet)) { throw "hash mismatch not reported" }
+            Assert-NoModel 'after hash mismatch'
+
+            # 5. Unreachable mirror: retried, then a clear failure.
+            $env:BOOKTRANS_MODEL_URLS = 'http://127.0.0.1:9/none.zip'
+            $code = Invoke-BookTrans 'unreachable' @('--download-model', '--yes')
+            if ($code -ne 5) { throw "expected exit 5 when unreachable, got $code" }
+            if (-not (Select-String -Path smoke-logs/unreachable.log -Pattern '3/3' -Quiet)) { throw "retries not reported" }
+            Assert-NoModel 'after network failure'
+          } finally {
+            Stop-Process -Id $srv.Id -ErrorAction SilentlyContinue
+            Remove-Item Env:BOOKTRANS_MODEL_URLS -ErrorAction SilentlyContinue
+          }
+
+          # 6. A wrong model file given by hand is rejected.
+          $code = Invoke-BookTrans 'install-wrong-file' @('--install-model', 'fake-mirror/fake.zip')
+          if ($code -ne 5) { throw "expected exit 5 for a wrong model file, got $code" }
+          Assert-NoModel 'after a wrong model file'
+
+          # 7. Consented download from the official release location, verified against the pinned hash.
+          $pinned = python -c "from booktrans.models import MODEL_SHA256; print(MODEL_SHA256)"
+          $code = Invoke-BookTrans 'download' @('--download-model', '--yes')
+          if ($code -ne 0) { throw "official download failed with $code" }
+          $marker = Get-Content (Join-Path $models 'quickmt-en-ko/.complete') -Raw
+          if ($marker.Trim() -ne $pinned) { throw "unexpected marker after download: $marker" }
+          $tmp = Get-ChildItem -Force $models | Where-Object { $_.Name -like '.*' }
+          if ($tmp) { throw "temporary files left after download: $($tmp.Name -join ', ')" }
+
+          # 7b. The same package installed from a file (the offline route), replacing the download.
+          Remove-Item -Recurse -Force (Join-Path $models 'quickmt-en-ko')
+          Assert-NoModel 'after removing the downloaded model'
+          $code = Invoke-BookTrans 'install-model' @('--install-model', 'model-archive/booktrans-model-quickmt-en-ko.zip')
+          if ($code -ne 0) { throw "model file install failed with $code" }
+          $marker = Get-Content (Join-Path $models 'quickmt-en-ko/.complete') -Raw
+          if ($marker.Trim() -ne $pinned) { throw "unexpected marker: $marker" }
+          $tmp = Get-ChildItem -Force $models | Where-Object { $_.Name -like '.*' }
+          if ($tmp) { throw "temporary files left after install: $($tmp.Name -join ', ')" }
+          "installed model size: {0:N1} MB" -f ((Get-ChildItem -Recurse -File (Join-Path $models 'quickmt-en-ko') | Measure-Object Length -Sum).Sum / 1MB)
+
+          # 8. Real translation of the fixture with the installed model, all three outputs.
+          #    Exit 7 = written with warnings (some sentences withheld); quality is judged in its own job.
+          $code = Invoke-BookTrans 'translate' @('smoke.pdf', '-o', 'smoke-out', '--mode', 'overlay', '--mode', 'side-by-side', '--mode', 'text')
+          if ($code -ne 0 -and $code -ne 7) { throw "translation failed with $code" }
+          foreach ($f in 'smoke.ko.pdf', 'smoke.en-ko.pdf', 'smoke.en-ko.md', 'smoke.report.json') {
+            if (-not (Test-Path "smoke-out/$f")) { throw "missing $f" }
+          }
+          # Structure: size budget, duplicate fonts, Korean per page, overlaps, small text, rendering.
+          python packaging/verify_output.py --input smoke.pdf --outdir smoke-out --render-dir smoke-render --probes packaging/fixture-probes.json --json smoke-verify.json
+          if ($LASTEXITCODE -ne 0) { throw "output structure check failed (see smoke-verify.json)" }
+          # The verifier must also reject a known-bad output (font copies per text box, no Korean).
+          python packaging/make_bad_output.py smoke.pdf smoke-out bad-out
+          if ($LASTEXITCODE -ne 0) { throw "could not write the known-bad output" }
+          python packaging/verify_output.py --input smoke.pdf --outdir bad-out --render-dir bad-render
+          if ($LASTEXITCODE -eq 0) { throw "the verifier accepted a known-bad output" }
+          $global:LASTEXITCODE = 0
+
+          # 9. Legal notices are reachable from the exe.
+          $code = Invoke-BookTrans 'about' @('--about')
+          if ($code -ne 0) { throw "--about failed" }
+          if (-not (Select-String -Path smoke-logs/about.log -Pattern 'AGPL' -Quiet)) { throw "--about lacks the license notice" }
+      - name: Clean Windows container without network - offline PDF translation
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          $root = (Resolve-Path .).Path
+          $image = 'mcr.microsoft.com/windows/servercore:ltsc2022'
+          New-Item -ItemType Directory -Force container-work | Out-Null
+          Copy-Item smoke.pdf container-work/
+          Copy-Item -Recurse fresh-appdata container-work/appdata
+          # Drop the translation cache so the model really runs inside the container.
+          Remove-Item container-work/appdata/BookTrans/memory.sqlite3 -ErrorAction SilentlyContinue
+          docker pull $image
+          if ($LASTEXITCODE -ne 0) { throw "docker pull failed" }
+          docker run --rm $image cmd /c "for %f in (vcruntime140.dll msvcp140.dll vcomp140.dll) do @if exist C:\Windows\System32\%f (echo %f present in clean image) else (echo %f absent in clean image)"
+          $inner = '$env:LOCALAPPDATA=''C:\work\appdata''; $env:BOOKTRANS_LOG=''C:\work\container.log''; $p = Start-Process C:\app\BookTrans.exe -ArgumentList ''C:\work\smoke.pdf'',''-o'',''C:\work\out'',''--mode'',''overlay'',''--mode'',''side-by-side'',''--mode'',''text'' -Wait -PassThru; exit $p.ExitCode'
+          docker run --rm --network none -v "${root}\dist\BookTrans:C:\app:ro" -v "${root}\container-work:C:\work" $image powershell -NoProfile -Command $inner
+          $code = $LASTEXITCODE
+          Get-Content container-work/container.log -Encoding utf8 -ErrorAction SilentlyContinue
+          if ($code -ne 0 -and $code -ne 7) { throw "offline translation in the clean container failed ($code)" }
+          python packaging/verify_output.py --input smoke.pdf --outdir container-work/out --render-dir container-render --json container-verify.json
+          if ($LASTEXITCODE -ne 0) { throw "container output verification failed" }
+      - name: Upload smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BookTrans-0.1.2-smoke-diagnostics
+          if-no-files-found: ignore
+          path: |
+            booktrans/smoke.pdf
+            booktrans/smoke-logs/
+            booktrans/smoke-verify.json
+            booktrans/smoke-render/
+            booktrans/container-verify.json
+            booktrans/container-render/
+            booktrans/container-work/out/
+            booktrans/utf8-check.txt
+            booktrans/smoke-out/
+            booktrans/third-party-src/SOURCES_MANIFEST.txt
+            booktrans/third-party-src/BUNDLED_FILES.txt
+            booktrans/third-party-src/BUILD_ENV.txt
+            booktrans/dist/BookTrans/THIRD_PARTY_NOTICES.txt
+            booktrans/evidence/
+            booktrans/container-work/container.log
+            booktrans/third-party-src/ctranslate2-SUBMODULES.txt
+            booktrans/third-party-src/GATE_STATUS.json
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $inno = "${env:ProgramFiles(x86)}\Inno Setup 6"
+          $iscc = "$inno\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup install failed" }
+          }
+          # Evidence: the license shipped with this exact Inno Setup build, and the official one.
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          Copy-Item "$inno\license.txt" evidence/inno-setup-license-installed.txt
+          (Get-Item $iscc).VersionInfo | Format-List FileVersion, ProductVersion, ProductName | Out-String | Set-Content evidence/inno-setup-version.txt
+          curl.exe -fsSL -o evidence/inno-setup-license-official.txt https://jrsoftware.org/files/is/license.txt
+          Get-Content evidence/inno-setup-version.txt, evidence/inno-setup-license-installed.txt
+          $version = python -c "import booktrans; print(booktrans.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "could not read BookTrans version" }
+          if ($version -ne '0.1.2') { throw "version mismatch: $version" }
+          & $iscc "/DAppVersion=$version" packaging/installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+      - name: Build clean source ZIP (allowlist + secret/private-name scan)
+        shell: pwsh
+        env:
+          # Names that must never appear in a public source export.
+          BOOKTRANS_PRIVATE_TERMS: "rea-workspace"
+        run: |
+          python packaging/make_source_zip.py --out dist/BookTrans-Source-0.1.2.zip --prefix BookTrans-Source-0.1.2
+          if ($LASTEXITCODE -ne 0) { throw "source export failed" }
+      - name: Portable ZIP (no installer)
+        shell: pwsh
+        run: |
+          python packaging/archive_tree.py dist/BookTrans dist/BookTrans-Portable-0.1.2.zip BookTrans
+          if ($LASTEXITCODE -ne 0) { throw "portable zip failed" }
+      - name: SHA256SUMS
+        shell: pwsh
+        run: |
+          python -c "import hashlib,pathlib; fs=sorted(pathlib.Path('dist').glob('BookTrans-*-0.1.2.*')); open('dist/SHA256SUMS','w',newline='\n').write(''.join(f'{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.name}\n' for f in fs))"
+          if ($LASTEXITCODE -ne 0) { throw "checksum failed" }
+          Get-Content dist/SHA256SUMS
+          if ((Get-Content dist/SHA256SUMS).Count -ne 4) { throw "expected 4 release files" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BookTrans-Setup-0.1.2
+          path: booktrans/dist/BookTrans-Setup-0.1.2.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BookTrans-Portable-0.1.2
+          path: booktrans/dist/BookTrans-Portable-0.1.2.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BookTrans-Source-0.1.2
+          path: booktrans/dist/BookTrans-Source-0.1.2.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BookTrans-ThirdParty-Source-0.1.2
+          path: booktrans/dist/BookTrans-ThirdParty-Source-0.1.2.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BookTrans-SHA256SUMS-0.1.2
+          path: booktrans/dist/SHA256SUMS
+          if-no-files-found: error
+
+  # Translation quality is judged separately from the build: this job can fail while the
+  # installer job above is green. It reads the real exe's output on the synthetic book.
+  quality-gate:
+    needs: windows-installer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - run: pip install --require-hashes -r packaging/requirements-lock.txt
+      - run: pip install --no-deps -e .
+      - uses: actions/download-artifact@v4
+        with:
+          name: BookTrans-0.1.2-smoke-diagnostics
+          path: diag
+      - name: Meaning probes on the Windows exe output (fixture)
+        run: |
+          python packaging/verify_output.py --input ../diag/smoke.pdf --outdir ../diag/smoke-out --render-dir /tmp/render \
+            --probes packaging/fixture-probes.json --json /tmp/quality.json --quality-only | tee /tmp/quality.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BookTrans-0.1.2-quality-report
+          path: |
+            /tmp/quality.json
+            /tmp/quality.txt
+
+  # Source/license completeness for distribution, judged separately from the build and from
+  # translation quality. Its failure means "not distributable", not "build broken".
+  distribution-gate:
+    needs: windows-installer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: BookTrans-0.1.2-smoke-diagnostics
+          path: diag
+      - name: Strict source and license gate
+        working-directory: diag
+        run: |
+          cat third-party-src/GATE_STATUS.json
+          sed -n '/# UNRESOLVED/,$p' third-party-src/SOURCES_MANIFEST.txt
+          python3 -c "import json,sys; s=json.load(open('third-party-src/GATE_STATUS.json')); sys.exit(0 if s['passed'] else 1)"
+
+  # Runs only when the build, its tests and the distribution gate passed.
+  publish:
+    needs: [windows-installer, distribution-gate]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: BookTrans-*-0.1.2
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums
+        working-directory: dist
+        run: |
+          ls -l
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Replace the release files
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            dist/BookTrans-Setup-0.1.2.exe
+            dist/BookTrans-Portable-0.1.2.zip
+            dist/BookTrans-Source-0.1.2.zip
+            dist/BookTrans-ThirdParty-Source-0.1.2.zip
+            dist/SHA256SUMS
