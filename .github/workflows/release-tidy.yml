@@ -1,0 +1,42 @@
+name: Release notes and stale files
+
+# Manual: sets a release's notes from release-notes/<tag>.md, removes the named stale
+# assets, then downloads every remaining file and checks it against the release's SHA256SUMS.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        default: v0.1.2
+        required: true
+      remove:
+        description: Space-separated asset names to delete
+        default: booktrans-model-m2m100_418M-ct2-int8.zip
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      REMOVE: ${{ inputs.remove }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notes
+        run: gh release edit "$TAG" --notes-file "release-notes/$TAG.md"
+      - name: Remove stale files
+        run: |
+          for name in $REMOVE; do
+            gh release delete-asset "$TAG" "$name" -y || echo "not present: $name"
+          done
+      - name: Verify the remaining files against SHA256SUMS
+        run: |
+          mkdir dl && cd dl
+          gh release download "$TAG"
+          ls -l
+          sha256sum -c SHA256SUMS
+          test "$(ls | wc -l)" -eq "$(( $(wc -l < SHA256SUMS) + 1 ))"
