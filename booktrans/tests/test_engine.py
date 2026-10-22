@@ -8,12 +8,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from booktrans.engine import ArgosEngine, M2M100Engine, ModelNotFoundError, find_model_dir, load_engine
+from booktrans.engine import ArgosEngine, M2M100Engine, ModelNotFoundError, QuickMTEngine, find_model_dir, load_engine
 
 META = {
     "format": 1, "engine": "m2m100", "name": "m2m100_418M", "revision": "55c2e61bbf05dfb8d7abccdc3fae6fc8512fd636",
     "quantization": "int8", "tokenizer": "sentencepiece.bpe.model",
     "source_lang_token": "__en__", "target_lang_token": "__ko__",
+}
+
+
+QMETA = {
+    "format": 1, "engine": "quickmt", "name": "quickmt-en-ko", "revision": "0123456789abcdef0123456789abcdef01234567",
+    "quantization": "int8", "source_tokenizer": "src.spm.model", "target_tokenizer": "tgt.spm.model",
 }
 
 
@@ -84,7 +90,9 @@ def test_load_engine_dispatch(tmp_path, monkeypatch):
     argos = tmp_path / "argos"
     argos.mkdir()
     assert isinstance(load_engine(argos), ArgosEngine)
-    assert [k for k, _ in built] == ["m2m", "argos"]
+    monkeypatch.setattr(QuickMTEngine, "__init__", lambda self, d, threads=None: built.append(("quickmt", d)))
+    assert isinstance(load_engine(package(tmp_path / "q", QMETA)), QuickMTEngine)
+    assert [k for k, _ in built] == ["m2m", "argos", "quickmt"]
     other = package(tmp_path / "o", {**META, "engine": "nllb"})
     with pytest.raises(ModelNotFoundError):
         load_engine(other)
@@ -97,3 +105,26 @@ def test_pieces_outside_the_model_vocabulary_become_unk(tmp_path):
     (d / "model" / "shared_vocabulary.json").write_text(json.dumps(["<s>", "<pad>", "</s>", "<unk>", "▁In", "▁1848", "__en__", "__ko__"]))
     eng = M2M100Engine(d, translator=FakeTranslator(), tokenizer=FakeSP())
     assert eng.source_tokens("In nearly 1848") == ["__en__", "▁In", "<unk>", "▁1848", "</s>"]
+
+
+class Plain:
+    """Target-side stand-in: decodes any piece, special tokens must already be gone."""
+
+    def decode(self, pieces):
+        assert "</s>" not in pieces and "<unk>" not in pieces, pieces
+        return "".join(pieces).replace("▁", " ")
+
+
+def test_quickmt_framing_matches_the_quickmt_library(tmp_path):
+    """quickmt/translator.py: pieces + ["</s>"], no target prefix, disable_unk=True."""
+    d = package(tmp_path, QMETA)
+    (d / "model" / "source_vocabulary.json").write_text(json.dumps(["<unk>", "<s>", "</s>", "▁Hello", "▁world"]))
+    tr = FakeTranslator()
+    eng = QuickMTEngine(d, translator=tr, source_tokenizer=FakeSP(), target_tokenizer=Plain())
+    assert eng.engine_id == "quickmt:quickmt-en-ko:0123456789:int8:en-ko"
+    assert eng.source_tokens("Hello big world") == ["▁Hello", "<unk>", "▁world", "</s>"]
+    out = eng.translate_batch(["Hello world"])
+    tokens, kw = tr.calls[0]
+    assert tokens == [["▁Hello", "▁world", "</s>"]] and "target_prefix" not in kw
+    assert kw["disable_unk"] is True
+    assert out == ["안녕 세상"]  # __ko__ from the fake hypothesis is dropped as a special token

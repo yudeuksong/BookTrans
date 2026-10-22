@@ -1,7 +1,7 @@
 """Evidence for the model decision: license, size, CPU speed, peak RAM and meaning probes
 for en->ko candidates, measured the way BookTrans would run them. CI only; nothing ships.
 
-    python evaluate_models.py <argos-model-root> <out-dir>
+    python evaluate_models.py <argos-model-root> <out-dir> [--only id1,id2]
 
 * Every model gets the same input after BookTrans preprocessing (optimizer.model_input),
   runs in its own process through CTranslate2 int8 on CPU (peak RSS from /proc), and its
@@ -13,6 +13,11 @@ for en->ko candidates, measured the way BookTrans would run them. CI only; nothi
 * Probes demand the content words AND the meaning marker (negation predicate, number,
   contrast), not a single keyword. "auto-accept" = probe matched and review raised nothing.
   This is an automatic screen; the sample outputs still need a person to read them.
+* Models published directly in CTranslate2 format (quickmt) are not converted: BookTrans's
+  own QuickMTEngine runs them, the official quickmt library is the baseline, and the
+  synthetic book (make_fixture.py) also goes through the full BookTrans pipeline with the
+  fixture probes. Their license is recorded but does not block the evaluation (nothing is
+  redistributed here); it decides only whether the model could ship.
 * DEV holds the failures users reported. HELD_OUT was written separately and is not used
   to tune anything.
 """
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -77,7 +83,9 @@ CANDIDATES = [
     "Helsinki-NLP/opus-mt-tc-big-en-ko",
     "Helsinki-NLP/opus-mt-en-mul",
     "facebook/nllb-200-distilled-600M",
+    "quickmt/quickmt-en-ko",
 ]
+NATIVE_CT2 = {"quickmt/quickmt-en-ko"}
 PERMISSIVE = {"mit", "apache-2.0", "cc-by-4.0", "cc0-1.0", "bsd-3-clause"}
 MAX_WEIGHTS = 5_500_000_000
 BASELINE_N = 6
@@ -159,6 +167,14 @@ def worker_ct2(spec: dict) -> dict:
         start = time.perf_counter()
         outs = eng.translate_batch(texts, careful=spec.get("careful", False))
         notes = [eng.engine_id, f"decoding {'CAREFUL' if spec.get('careful') else 'FAST'}: {CAREFUL if spec.get('careful') else FAST}"]
+    elif spec["kind"] == "native":
+        from booktrans.engine import QuickMTEngine
+
+        eng = QuickMTEngine(Path(spec["package"]))
+        load = time.perf_counter() - start
+        start = time.perf_counter()
+        outs = [eng.translate_batch([t])[0] for t in texts]  # one at a time, like the other candidates
+        notes = [eng.engine_id, f"source tokens for '{texts[0]}': {eng.source_tokens(texts[0])}"]
     else:
         import ctranslate2
         import transformers
@@ -214,8 +230,89 @@ def worker_baseline(spec: dict) -> dict:
     return {"baseline": outs, "notes": cfg["notes"]}
 
 
+def worker_baseline_quickmt(spec: dict) -> dict:
+    """The official quickmt library on the first sentences (its own tokenization and decoding)."""
+    from quickmt import Translator
+    from booktrans.optimizer import model_input
+
+    try:
+        t = Translator(spec["path"], device="cpu", compute_type="int8")
+        how = "local snapshot, int8"
+    except Exception as exc:  # the library may only accept a Hub id
+        t = Translator(spec["id"], device="cpu", compute_type="int8")
+        how = f"hub id (local path refused: {type(exc).__name__})"
+    texts = [model_input(src) for _, src, *_ in items()[:BASELINE_N]]
+    outs = t(texts, beam_size=4)
+    outs = [outs] if isinstance(outs, str) else list(outs)
+    return {"baseline": [str(o) for o in outs], "notes": [f"quickmt library via {how}"]}
+
+
+def worker_fixture(spec: dict) -> dict:
+    """The synthetic book through the full BookTrans pipeline with this engine, then the probes."""
+    import importlib.util
+    import tempfile
+
+    from booktrans.engine import QuickMTEngine
+    from booktrans.optimizer import TranslationMemory
+    from booktrans.pipeline import JobOptions, run_job
+    from verify_output import check_probes
+
+    here = Path(__file__).resolve().parent
+    mspec = importlib.util.spec_from_file_location("make_fixture", here / "make_fixture.py")
+    mod = importlib.util.module_from_spec(mspec)
+    mspec.loader.exec_module(mod)
+    with tempfile.TemporaryDirectory() as tmp:
+        book, out = Path(tmp) / "smoke.pdf", Path(tmp) / "out"
+        mod.build(book)
+        start = time.perf_counter()
+        result = run_job(JobOptions(book, out, modes=("overlay", "side-by-side", "text")),
+                         QuickMTEngine(Path(spec["package"])), TranslationMemory(None))
+        elapsed = time.perf_counter() - start
+        probes, summary = check_probes(book, out, here / "fixture-probes.json")
+    return {"fixture_seconds": round(elapsed, 1), "fixture_stats": result.stats.summary(),
+            "fixture_warnings": result.warnings, "fixture_probe_summary": summary,
+            "fixture_probes": [{k: p[k] for k in ("source", "verdict", "shown")} for p in probes],
+            "peak_rss_mb": round(peak_rss_mb())}
+
+
+def native_package(local: Path, mid: str, revision: str) -> Path:
+    """Lay out a quickmt snapshot the way BookTrans installs a model (booktrans-model.json)."""
+    from booktrans.engine import MODEL_META
+
+    bins = sorted(local.rglob("model.bin"))
+    if not bins:
+        raise RuntimeError(f"{mid}: no model.bin in the snapshot")
+    model_dir = bins[0].parent
+    spms = sorted(p for p in local.rglob("*.model") if not ({".ipynb_checkpoints", ".cache"} & set(p.parts)))
+
+    def pick(pattern: str) -> Path:
+        found = [p for p in spms if re.search(pattern, p.name, re.I)]
+        # Copies in several folders are fine if identical; prefer the one next to model.bin.
+        if not found or len({p.read_bytes() for p in found}) != 1:
+            listing = [p.relative_to(local).as_posix() for p in spms]
+            raise RuntimeError(f"{mid}: no single {pattern} SentencePiece model: {listing}")
+        return min(found, key=lambda p: (p.parent != model_dir, len(p.parts)))
+
+    src, tgt = [pick(r"src|source")], [pick(r"tgt|target")]
+    if src[0].read_bytes() == tgt[0].read_bytes():
+        raise RuntimeError(f"{mid}: source and target SentencePiece models are the same file")
+    pkg = local.parent / (local.name + "-pkg")
+    shutil.rmtree(pkg, ignore_errors=True)
+    pkg.mkdir()
+    (pkg / "model").symlink_to(model_dir.resolve(), target_is_directory=True)
+    shutil.copyfile(src[0], pkg / src[0].name)
+    shutil.copyfile(tgt[0], pkg / tgt[0].name)
+    meta = {"format": 1, "engine": "quickmt", "name": mid.split("/")[-1], "revision": revision, "quantization": "int8",
+            "source_tokenizer": src[0].name, "target_tokenizer": tgt[0].name}
+    (pkg / MODEL_META).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return pkg
+
+
 def run(kind: str, spec: dict) -> dict:
-    proc = subprocess.run([sys.executable, __file__, f"--{kind}", json.dumps(spec)], capture_output=True, text=True)
+    # The quickmt library lives in its own venv so its dependencies cannot change the tools
+    # every other measurement uses.
+    python = os.environ.get("QUICKMT_PYTHON", sys.executable) if kind == "quickmt" else sys.executable
+    proc = subprocess.run([python, __file__, f"--{kind}", json.dumps(spec)], capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr[-3000:])
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -247,7 +344,7 @@ def summarize(r: dict) -> dict:
     return out
 
 
-def main(argos_root: str, out_dir: str) -> int:
+def main(argos_root: str, out_dir: str, only: set[str] | None = None) -> int:
     from booktrans.engine import find_model_dir
 
     out = Path(out_dir)
@@ -269,10 +366,36 @@ def main(argos_root: str, out_dir: str) -> int:
     from huggingface_hub import snapshot_download
 
     for mid in CANDIDATES:
+        if only and mid not in only:
+            continue
         entry = {"id": mid}
         try:
             entry.update(model_info(mid))
-            if entry["license"].lower() not in PERMISSIVE:
+            if mid in NATIVE_CT2:
+                local = work / mid.replace("/", "__")
+                snapshot_download(mid, revision=entry["revision"], local_dir=str(local))
+                files = sorted(f"{p.relative_to(local).as_posix()} ({p.stat().st_size} bytes)"
+                               for p in local.rglob("*") if p.is_file() and ".cache" not in p.parts)
+                entry["files"] = files
+                for name in ("README.md", "LICENSE", "LICENSE.md", "LICENSE.txt"):
+                    if (local / name).is_file():
+                        shutil.copyfile(local / name, out / f"{mid.replace('/', '__')}-{name}")
+                pkg = native_package(local, mid, entry["revision"])
+                entry["size_bytes"] = dir_size(pkg / "model") + sum(dir_size(p) for p in pkg.glob("*.model"))
+                spec = {"kind": "native", "id": mid, "path": str(local), "package": str(pkg)}
+                entry.update(run("ct2", spec))
+                rss_eval, notes = entry["peak_rss_mb"], entry["notes"]
+                try:
+                    base = run("quickmt", spec)
+                    entry["baseline"], entry["notes"] = base["baseline"], notes + base["notes"]
+                    validate_against_baseline(entry)
+                except Exception as exc:
+                    entry["status"] = f"evaluation-invalid: official quickmt baseline failed: {type(exc).__name__}: {str(exc)[-600:]}"
+                entry.update(run("fixture", spec))
+                entry["peak_rss_mb_fixture"], entry["peak_rss_mb"] = entry["peak_rss_mb"], rss_eval
+                if entry["license"].lower() not in PERMISSIVE:
+                    entry["status"] += f" (license {entry['license']}: not cleared to ship)"
+            elif entry["license"].lower() not in PERMISSIVE:
                 entry["status"] = f"skipped: license {entry['license']} does not allow unrestricted use"
             elif entry["weights_bytes"] > MAX_WEIGHTS:
                 entry["status"] = "skipped: weights larger than 5.5 GB"
@@ -295,7 +418,7 @@ def main(argos_root: str, out_dir: str) -> int:
             entry["status"] = f"error: {type(exc).__name__}: {str(exc)[-1500:]}"
             errors += 1
         results.append(entry)
-        print(json.dumps({k: v for k, v in entry.items() if k not in ("rows",)}, ensure_ascii=False), flush=True)
+        print(json.dumps({k: v for k, v in entry.items() if k not in ("rows",)}, ensure_ascii=False, indent=1), flush=True)
 
     (out / "model-candidates.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     mb = lambda b: f"{b / 1e6:.0f} MB" if b else "-"
@@ -326,14 +449,25 @@ def main(argos_root: str, out_dir: str) -> int:
             tag = "" if r.get("status") == "evaluated" else " [evaluation-invalid]"
             lines.append(f"- {mark} {r['id']}{tag}: {x['output']}" + (f"  ({', '.join(x['review_issues'])})" if x["review_issues"] else ""))
         lines.append("")
+    for r in results:
+        if "fixture_probe_summary" in r:
+            lines += [f"## Synthetic book through the BookTrans pipeline: {r['id']}", "",
+                      f"- time {r['fixture_seconds']} s, peak RAM {r['peak_rss_mb_fixture']} MB",
+                      f"- {r['fixture_stats']}", f"- warnings: {r['fixture_warnings']}",
+                      f"- probes: {r['fixture_probe_summary']}"]
+            lines += [f"  - [{x['verdict']}] {x['source']} => {x['shown']}" for x in r["fixture_probes"]]
+            lines.append("")
     (out / "model-candidates.md").write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines))
     return 1 if errors else 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 2 and sys.argv[1] in ("--ct2", "--baseline"):
-        fn = worker_ct2 if sys.argv[1] == "--ct2" else worker_baseline
-        print(json.dumps(fn(json.loads(sys.argv[2])), ensure_ascii=False))
+    workers = {"--ct2": worker_ct2, "--baseline": worker_baseline, "--quickmt": worker_baseline_quickmt,
+               "--fixture": worker_fixture}
+    if len(sys.argv) > 2 and sys.argv[1] in workers:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        print(json.dumps(workers[sys.argv[1]](json.loads(sys.argv[2])), ensure_ascii=False))
         sys.exit(0)
-    sys.exit(main(sys.argv[1], sys.argv[2]))
+    only = set(sys.argv[4].split(",")) if len(sys.argv) > 4 and sys.argv[3] == "--only" else None
+    sys.exit(main(sys.argv[1], sys.argv[2], only))

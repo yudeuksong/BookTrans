@@ -222,7 +222,7 @@ def test_no_download_location_means_install_from_file(monkeypatch, tmp_path, cap
     from booktrans import cli
 
     monkeypatch.delenv("BOOKTRANS_MODEL_URLS", raising=False)
-    assert models.MODEL_URLS == ()
+    monkeypatch.setattr(models, "MODEL_URLS", ())
     called = []
     monkeypatch.setattr(cli, "download_model", lambda **kw: called.append(kw))
     assert cli.main(["--download-model", "--yes"]) == cli.EXIT_DOWNLOAD_FAILED
@@ -232,6 +232,11 @@ def test_no_download_location_means_install_from_file(monkeypatch, tmp_path, cap
     with pytest.raises(ModelDownloadError, match="--install-model"):
         download_model(consent=True, dest_root=tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_official_location_is_https_and_names_the_pinned_file():
+    assert models.MODEL_URLS and all(u.startswith("https://") and u.endswith("/" + models.MODEL_FILE) for u in models.MODEL_URLS)
+    assert models.MODEL_REVISION[:7] in models.MODEL_URLS[0]
 
 
 def test_pinned_model_identity():

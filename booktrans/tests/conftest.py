@@ -7,13 +7,16 @@ import pytest
 
 
 def _fake_word(w: str) -> str:
-    """Hangul of half the word's length; digits and negation survive, like a decent model."""
+    """Hangul of about half the word's length; digits and negation survive, like a decent model."""
     core = w.strip(".,;:!?\"'()")
     if any(c.isdigit() for c in core):
         return core
     if core.lower() in ("not", "never", "no", "nothing", "cannot") or core.lower().endswith("n't"):
         return "않"
-    return "가" * max(1, len(core) // 2)
+    # Starts with 가; the last syllable depends on the word, so different words differ (as in
+    # real Korean) and a run of different words is not mistaken for a repeated phrase.
+    tail = "나다라마바사아자차카타파하"[sum(map(ord, core)) % 13]
+    return "가" * max(0, len(core) // 2 - 1) + tail if len(core) >= 2 else "가"
 
 
 class FakeEngine:

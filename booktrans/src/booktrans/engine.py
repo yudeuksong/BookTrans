@@ -5,6 +5,8 @@ transformers/torch (which would make the Windows installer several hundred MB la
 
 * M2M100Engine (default): Meta's m2m100_418M converted to CTranslate2 int8 and packed by
   packaging/build_m2m100_model.py. The package carries booktrans-model.json.
+* QuickMTEngine: a quickmt model (CTranslate2 export with separate source/target
+  SentencePiece models), described by booktrans-model.json with engine "quickmt".
 * ArgosEngine: an Argos Translate package (kept for comparisons and existing installs).
 """
 
@@ -65,9 +67,11 @@ def load_engine(model_dir: Path, *, threads: int | None = None) -> TranslationEn
     meta_path = model_dir / MODEL_META
     if meta_path.is_file():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("engine") != "m2m100":
-            raise ModelNotFoundError(f"Unsupported model engine in {meta_path}: {meta.get('engine')!r}")
-        return M2M100Engine(model_dir, threads=threads)
+        if meta.get("engine") == "m2m100":
+            return M2M100Engine(model_dir, threads=threads)
+        if meta.get("engine") == "quickmt":
+            return QuickMTEngine(model_dir, threads=threads)
+        raise ModelNotFoundError(f"Unsupported model engine in {meta_path}: {meta.get('engine')!r}")
     return ArgosEngine(model_dir, threads=threads)
 
 
@@ -183,13 +187,68 @@ class M2M100Engine:
         return out
 
 
-def _read_vocabulary(model_dir: Path) -> frozenset[str] | None:
-    js, txt = model_dir / "shared_vocabulary.json", model_dir / "shared_vocabulary.txt"
-    if js.is_file():
-        return frozenset(json.loads(js.read_text(encoding="utf-8")))
-    if txt.is_file():
-        return frozenset(txt.read_text(encoding="utf-8").splitlines())
+def _read_vocabulary(model_dir: Path, side: str = "shared") -> frozenset[str] | None:
+    """CTranslate2 vocabulary for side "shared", "source" or "target" (source/target fall
+    back to the shared file)."""
+    names = [side] if side == "shared" else [side, "shared"]
+    for name in names:
+        js, txt = model_dir / f"{name}_vocabulary.json", model_dir / f"{name}_vocabulary.txt"
+        if js.is_file():
+            return frozenset(json.loads(js.read_text(encoding="utf-8")))
+        if txt.is_file():
+            return frozenset(txt.read_text(encoding="utf-8").splitlines())
     return None
+
+
+class QuickMTEngine:
+    """A quickmt model: CTranslate2 Transformer with its own source and target SentencePiece
+    models, framed exactly as the quickmt library (quickmt/translator.py) does: source =
+    pieces + [</s>], no target prefix, <unk> never generated. Pieces missing from the source
+    vocabulary become <unk>. packaging/check_quickmt_engine.py compares this with the library."""
+
+    def __init__(self, model_dir: Path, *, threads: int | None = None, translator=None,
+                 source_tokenizer=None, target_tokenizer=None):
+        self.model_dir = model_dir
+        self.metadata = json.loads((model_dir / MODEL_META).read_text(encoding="utf-8"))
+        m = self.metadata
+        self.engine_id = f"quickmt:{m['name']}:{m['revision'][:10]}:{m['quantization']}:en-ko"
+        if source_tokenizer is None or target_tokenizer is None:
+            import sentencepiece
+
+            source_tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(model_dir / m["source_tokenizer"]))
+            target_tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(model_dir / m["target_tokenizer"]))
+        if translator is None:
+            import ctranslate2
+
+            translator = ctranslate2.Translator(
+                str(model_dir / "model"), device="cpu", compute_type=m["quantization"], intra_threads=_threads(threads)
+            )
+        self._src, self._tgt, self._translator = source_tokenizer, target_tokenizer, translator
+        self._vocab = _read_vocabulary(model_dir / "model", "source")
+
+    def count_tokens(self, text: str) -> int:
+        return len(self._src.encode(text, out_type=str))
+
+    def source_tokens(self, text: str) -> list[str]:
+        pieces = self._src.encode(text, out_type=str)
+        if self._vocab is not None:
+            pieces = [p if p in self._vocab else "<unk>" for p in pieces]
+        return [*pieces, "</s>"]
+
+    def translate_batch(self, texts: Sequence[str], *, careful: bool = False) -> list[str]:
+        if not texts:
+            return []
+        opts = CAREFUL if careful else FAST
+        results = self._translator.translate_batch(
+            [self.source_tokens(t) for t in texts],
+            beam_size=opts.beam_size,
+            repetition_penalty=opts.repetition_penalty,
+            no_repeat_ngram_size=opts.no_repeat_ngram_size,
+            disable_unk=True,
+            max_batch_size=32,
+            max_decoding_length=256,
+        )
+        return [self._tgt.decode([t for t in r.hypotheses[0] if not _SPECIAL.fullmatch(t)]).strip() for r in results]
 
 
 _SPECIAL = re.compile(r"__[a-z]{2,3}__|<s>|</s>|<pad>|<unk>")

@@ -157,6 +157,9 @@ _TGT_POSITIVE_CONTRAST = re.compile(r"뿐(만)?\s?아니라|만이\s?아니라|�
 _WEB_PHRASES = {
     "관련 기사": r"related|article",
     "(주)": r"\b(inc|co|corp|corporation|company|ltd|limited|llc)\b",
+    "가사 보기": r"lyric",
+    "제품 소개": r"product",
+    "강좌": r"course|lecture|class|lesson|seminar|tutorial",
     "계정 관리": r"account",
     "로그인": r"log\s?in|sign\s?in",
     "회원가입": r"sign\s?up|register",
@@ -195,6 +198,15 @@ def _has_loop(text: str) -> bool:
     return False
 
 
+def _whole_repeat(text: str) -> bool:
+    """The entire output is one phrase said two or more times ("제7장 제7장")."""
+    words = re.sub(r"[.!?。]+$", "", text.strip()).split()
+    for n in range(1, len(words) // 2 + 1):
+        if len(words) % n == 0 and words == words[:n] * (len(words) // n):
+            return True
+    return False
+
+
 def _english_left(source: str, target: str) -> list[str]:
     """Common English words copied into the output (proper nouns and acronyms are allowed)."""
     proper = set()
@@ -230,7 +242,7 @@ def review(source: str, target: str) -> list[QualityIssue]:
     if not tgt:
         return [QualityIssue("empty", "translation is empty")]
     issues: list[QualityIssue] = []
-    if _has_loop(tgt) and not _has_loop(src):
+    if (_has_loop(tgt) and not _has_loop(src)) or (_whole_repeat(tgt) and not _whole_repeat(src)):
         issues.append(QualityIssue("repetition", "output repeats a phrase"))
     hangul = len(_HANGUL.findall(tgt))
     latin = len(_LATIN.findall(tgt))

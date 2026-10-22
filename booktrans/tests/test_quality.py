@@ -17,6 +17,11 @@ def codes(src, tgt):
         ("Problem", "계정 관리", "문제", "web-phrase"),
         ("CONTENTS", "(주)에이치", "목차", "web-phrase"),
         ("PROBLEM", "(주)", "문제", "web-phrase"),
+        # quickmt-en-ko on short headings (evidence run #11)
+        ("You must be born again", "You must be born again 가사 보기", "당신은 다시 태어나야 합니다.", "web-phrase"),
+        ("Contents", "콘텐츠 강좌", "목차", "web-phrase"),
+        ("Introduction", "제품 소개", "서론", "web-phrase"),
+        ("Chapter Seven", "제7장 제7장", "제7장", "repetition"),
         ("The eighteenth century was an age of reason.", "8 세기는 이성의 시대였다.", "18세기는 이성의 시대였다.", "number"),
         ("Not only can your heart be changed, but your whole life can be renewed.",
          "당신의 마음은 바뀔 수 없고, 당신의 삶 전체가 새롭게 될 수 있습니다.",
@@ -100,3 +105,9 @@ def test_obligation_must_survive():
 def test_company_marker_allowed_when_the_source_names_a_company():
     assert "web-phrase" not in codes("The Ford Motor Company opened a new plant.", "(주)포드 자동차가 새 공장을 열었다.")
 
+
+
+def test_boilerplate_words_allowed_when_the_source_has_them():
+    assert "web-phrase" not in codes("The new product was introduced in May.", "새 제품 소개는 5월에 있었다.")
+    assert "web-phrase" not in codes("She taught a course on Kant.", "그녀는 칸트에 관한 강좌를 가르쳤다.")
+    assert "repetition" not in codes("Holy, holy", "거룩, 거룩")

@@ -22,32 +22,34 @@ BookTrans는 영어 원서 PDF를 한국어로 번역하는 Windows 프로그램
   - 개발자의 자동 빌드·시험은 GitHub Actions의 Windows Server 이미지에서만 이루어집니다.
   - 일반 Windows 10/11 PC에서의 동작과 프로그램 화면(GUI)은 자동 시험으로 확인되지 않습니다.
 - **미지원**: 32비트 Windows, ARM 전용 Windows, Windows 7/8.1
-- **메모리**: 8GB 이상 권장. 번역 중 BookTrans가 약 1GB를 씁니다(빌드 서버 측정값: 한 문장씩 번역할 때 최대 966MB).
-- **디스크 공간**: 설치 파일 약 45MB, 설치된 프로그램 약 170MB, 번역 모델 약 500MB, 번역 기록 캐시(사용량에 따라 증가)
-- **속도**: 빌드 서버(4코어 CPU)에서 한 문장씩 번역할 때 문장당 약 0.9초였습니다. PC 성능에 따라 다릅니다.
+- **메모리**: 4GB 이상 권장. 번역 중 BookTrans가 약 0.5GB를 씁니다(빌드 서버 측정값: 최대 440~470MB).
+- **디스크 공간**: 설치 파일 약 45MB, 설치된 프로그램 약 170MB, 번역 모델 약 370MB, 번역 기록 캐시(사용량에 따라 증가)
+- **속도**: 빌드 서버(4코어 CPU)에서 한 문장씩 번역할 때 문장당 약 0.08초였습니다. PC 성능에 따라 다릅니다.
 
 ## 처음 실행할 때: 번역 모델 준비 (최초 1회)
 
-번역 모델은 설치 파일에 들어 있지 않습니다. 모델 파일을 따로 받아 설치해야 합니다.
+번역 모델은 설치 파일에 들어 있지 않습니다. 처음 번역을 시작하면 프로그램이 모델을 내려받아도 되는지 묻고, **"예"를 눌렀을 때만** 내려받습니다.
 
-- **모델**: Meta AI의 M2M100 418M(`facebook/m2m100_418M`)을 CTranslate2 int8 형식으로 바꾼 파일
-- **파일 이름**: `booktrans-model-m2m100_418M-ct2-int8.zip`
-- **설치 방법**: 프로그램의 **"모델 파일 설치…"** 버튼으로 그 파일을 고릅니다. 명령줄에서는 `BookTrans.exe --install-model 파일경로`를 실행합니다.
+- **모델**: quickmt 프로젝트의 `quickmt-en-ko`(영어→한국어 전용, 약 1억 8,500만 매개변수, CTranslate2 형식)
+- **파일 이름**: `booktrans-model-quickmt-en-ko.zip`
+- **설치 방법**: 자동(동의 후 내려받기), 또는 프로그램의 **"모델 파일 설치…"** 버튼으로 받아 둔 파일을 고릅니다. 명령줄에서는 `BookTrans.exe --download-model`(동의 질문) 또는 `BookTrans.exe --install-model 파일경로`입니다.
 - **무결성 확인**: 파일의 SHA-256이 프로그램에 고정된 값과 같을 때만 설치합니다. 다르면 설치하지 않습니다.
 - **저장 위치**: `%LOCALAPPDATA%\BookTrans\models`
-- **자동 내려받기**: 이 버전에는 모델을 내려받을 공개 주소가 없습니다. "번역 시작"이나 `--download-model`은 내려받지 않고, 모델 파일을 설치하라고 안내합니다.
+- **내려받는 곳**: `https://github.com/yudeuksong/BookTrans/releases/download/quickmt-en-ko-a32fa39/booktrans-model-quickmt-en-ko.zip` (약 279MB, 최초 1회 인터넷 필요)
+  - 이 Release 파일은 BookTrans 저장소의 자동 작업이 공개된 모델에서 다시 만들어, 해시가 고정값과 같을 때만 올린 것입니다.
+- **직접 설치**: 인터넷이 막힌 PC에서는 위 주소에서 받은 파일을 다른 경로로 옮긴 뒤 설치할 수 있습니다. 같은 SHA-256 검사를 거칩니다.
 
 ### 모델 파일은 어떻게 만들어지나
 
-- 공식 체크포인트(`facebook/m2m100_418M`, 리비전 `55c2e61bbf05dfb8d7abccdc3fae6fc8512fd636`)를 받아 CTranslate2로 int8 변환합니다. 소스의 `packaging/build_m2m100_model.py`가 이 작업을 합니다.
-- 같은 체크포인트를 두 번 변환해 결과 파일이 바이트 단위로 같은지 확인합니다. 그 해시가 프로그램에 고정된 값입니다.
-- BookTrans의 번역 경로가 공식 transformers 모델과 같은 토큰을 쓰고 비슷한 번역을 내는지 빌드 서버에서 자동으로 확인합니다(`packaging/check_m2m100_engine.py`).
+- 공개된 모델(`quickmt/quickmt-en-ko`, 리비전 `a32fa395ebc7b722a0c021e213ca5fec4065c5df`)을 받아, quickmt 라이브러리가 읽는 파일만 그대로 묶습니다. 모델 자체는 바꾸지 않습니다. 소스의 `packaging/build_quickmt_model.py`가 이 작업을 합니다.
+- 같은 파일로 두 번 묶어 결과가 바이트 단위로 같은지 확인합니다. 그 해시가 프로그램에 고정된 값입니다.
+- BookTrans의 번역 경로가 공식 quickmt 라이브러리와 같은 토큰을 쓰고 같은 번역을 내는지 빌드 서버에서 자동으로 확인합니다(`packaging/check_quickmt_engine.py`).
 
 ### 모델 라이선스에 대해
 
-- 모델 카드(Hugging Face `facebook/m2m100_418M`)에 MIT 라이선스로 명시되어 있습니다.
-- 모델 파일 안에 `LICENSE`(MIT 원문, fairseq 저장소의 LICENSE와 같은지 빌드 때 확인), `MODEL_CARD.md`(모델 카드 원문), `PROVENANCE.txt`(변환 출처와 도구 버전)가 들어 있습니다.
-- 모델은 BookTrans가 만든 것이 아니라 Meta AI의 자료입니다. 사용 목적에 맞는지 모델 카드를 직접 확인하세요.
+- Hugging Face의 모델 정보에 **CC BY 4.0**(크리에이티브 커먼즈 저작자표시 4.0 국제)으로 명시되어 있습니다. 출처를 밝히면 상업적 이용과 재배포가 허용됩니다.
+- 모델 파일 안에 `ATTRIBUTION.txt`(저작자, 출처, 라이선스, 변경 사항), `MODEL_CARD.md`(모델 카드 원문), `PROVENANCE.txt`(파일별 SHA-256)가 들어 있습니다.
+- 모델은 BookTrans가 만든 것이 아니라 quickmt 프로젝트의 자료입니다.
 
 ## 사용법
 
@@ -65,14 +67,14 @@ BookTrans는 영어 원서 PDF를 한국어로 번역하는 Windows 프로그램
 ### 명령줄
 
 ```text
-BookTrans.exe --install-model booktrans-model-m2m100_418M-ct2-int8.zip   모델 파일 설치(최초 1회)
+BookTrans.exe --install-model booktrans-model-quickmt-en-ko.zip   모델 파일 설치(최초 1회)
 BookTrans.exe 책.pdf --pages 1-10 -o 결과폴더
 BookTrans.exe --about                     저작권·라이선스 고지
 ```
 
 ## 품질과 한계
 
-- **번역 품질**: PC에서 도는 오프라인 모델(418M)이라 상용 번역 서비스보다 품질이 낮습니다. 모든 결과는 기계 번역이므로, 중요한 내용은 원문과 함께 확인하세요.
+- **번역 품질**: PC에서 도는 작은 오프라인 모델(185M)이라 상용 번역 서비스보다 품질이 낮습니다. 모든 결과는 기계 번역이므로, 중요한 내용은 원문과 함께 확인하세요.
 - **문단 단위로 다시 묶은 뒤 번역**: PDF의 줄바꿈은 문장 경계가 아니므로, 같은 단의 줄을 문단으로 다시 묶은 뒤 번역합니다.
   - 제목, 목차, 머리글·쪽 번호는 따로 둡니다.
   - 다른 단의 글은 이어 붙이지 않습니다.

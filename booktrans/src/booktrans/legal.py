@@ -21,6 +21,7 @@ LICENSE-MIT, THIRD_PARTY_NOTICES.txt 와 licenses 폴더를 참고하세요.
 {SOURCE_NOTE}
 
 번역 모델은 BookTrans에 포함되지 않으며, 사용자가 따로 설치합니다.
-모델: Meta AI M2M100 418M (facebook/m2m100_418M). 모델 카드에 MIT 라이선스로
-명시되어 있으며, 모델 파일 안의 LICENSE와 MODEL_CARD.md에 원문이 들어 있습니다.
+모델: quickmt-en-ko (quickmt 프로젝트, https://huggingface.co/quickmt/quickmt-en-ko),
+Creative Commons 저작자표시 4.0 국제(CC BY 4.0) 라이선스. 출처와 라이선스는 모델 파일
+안의 ATTRIBUTION.txt와 MODEL_CARD.md에 있습니다.
 """

@@ -1,10 +1,5 @@
-# Model packaging in CI only (packaging/build_m2m100_model.py, check_m2m100_engine.py); never shipped.
-# The pinned output hash (models.MODEL_SHA256) is the real guard: a different toolchain that
-# changes the converted bytes fails the build.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.14.1+cpu
-transformers==5.20.2
+# Model packaging in CI only (packaging/build_quickmt_model.py, check_quickmt_engine.py); never shipped.
+# The pinned output hash (models.MODEL_SHA256) is the real guard.
 huggingface-hub==2.2.0
-safetensors==0.8.0
-tokenizers==0.23.3
-protobuf==7.36.2
+# Official quickmt library at a fixed commit, the reference for check_quickmt_engine.py.
+quickmt @ git+https://github.com/quickmt/quickmt.git@5fe386f1d24a42fce4f7115726fb4b51ee83c054

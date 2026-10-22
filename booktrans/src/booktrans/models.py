@@ -24,16 +24,19 @@ from typing import Callable
 from booktrans import __version__
 from booktrans.engine import ModelNotFoundError, find_model_dir
 
-MODEL_NAME = "m2m100_418M-ct2-int8"
-MODEL_FILE = "booktrans-model-m2m100_418M-ct2-int8.zip"
-# SHA-256 of the archive packaging/build_m2m100_model.py produces from facebook/m2m100_418M at
+MODEL_NAME = "quickmt-en-ko"
+MODEL_FILE = "booktrans-model-quickmt-en-ko.zip"
+# SHA-256 of the archive packaging/build_quickmt_model.py produces from quickmt/quickmt-en-ko at
 # MODEL_REVISION. The build is reproducible; CI rebuilds it and fails if the hash differs.
-MODEL_SHA256 = "83658df2ce689504f1893fa013a49febc10019872c28866a97247762c469b188"
-MODEL_REVISION = "55c2e61bbf05dfb8d7abccdc3fae6fc8512fd636"
-MODEL_PAGE = "https://huggingface.co/facebook/m2m100_418M"
-# No download location has been approved yet: the converted package is not hosted anywhere.
-# Until one is, the model is installed from a file (--install-model / "모델 파일 설치…").
-MODEL_URLS: tuple[str, ...] = ()
+MODEL_SHA256 = "2ef78d406cddf53fa621db0a5ec66a6cb8745932ec25a6d976fe94df6efda7cd"
+MODEL_REVISION = "a32fa395ebc7b722a0c021e213ca5fec4065c5df"
+MODEL_PAGE = "https://huggingface.co/quickmt/quickmt-en-ko"
+# The package as released by the BookTrans repository's model-release workflow, which rebuilds
+# it from the published model and releases it only if it matches MODEL_SHA256. Offline users
+# can install the same file with --install-model / "모델 파일 설치…".
+MODEL_URLS: tuple[str, ...] = (
+    f"https://github.com/yudeuksong/BookTrans/releases/download/quickmt-en-ko-a32fa39/{MODEL_FILE}",
+)
 MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 MAX_UNPACKED_BYTES = 1536 * 1024 * 1024
 MAX_MEMBERS = 2000
@@ -264,9 +267,8 @@ def download_model(
 
 
 MODEL_DESCRIPTION = (
-    "번역 모델: Meta AI의 M2M100 418M(facebook/m2m100_418M, 모델 카드에 MIT 라이선스로 명시)을 "
-    "CTranslate2 int8 형식으로 바꾼 파일입니다. BookTrans에는 포함되지 않습니다.\n"
-    "· 설치 후 디스크 약 500MB, 번역 중 메모리 약 1GB가 필요합니다.\n"
+    "번역 모델: quickmt-en-ko(quickmt 프로젝트, CC BY 4.0). BookTrans에는 포함되지 않습니다.\n"
+    "· 설치 후 디스크 약 370MB, 번역 중 메모리 약 0.5GB가 필요합니다.\n"
     "· 파일은 고정된 SHA-256 값과 일치할 때만 설치됩니다.\n"
     "· 저장 위치: %LOCALAPPDATA%\\BookTrans\\models"
 )

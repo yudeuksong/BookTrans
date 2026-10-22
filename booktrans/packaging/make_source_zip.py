@@ -23,7 +23,7 @@ ALLOW = ["booktrans/", ".github/workflows/booktrans.yml"]
 # Files placed at the archive root so the export can become a standalone repository.
 ROOT_COPIES = {"README.md": "booktrans/README.md", "LICENSE": "booktrans/LICENSE", "LICENSE-MIT": "booktrans/LICENSE-MIT"}
 FORBIDDEN_PATHS = [
-    "*.pdf", "*.sqlite3", "*.log", "*.argosmodel", "*model.bin", "*sentencepiece.model", "*sentencepiece.bpe.model", "*model-archive/*", "*.part",
+    "*.pdf", "*.sqlite3", "*.log", "*.argosmodel", "*model.bin", "*sentencepiece.model", "*sentencepiece.bpe.model", "*.spm.model", "*model-archive/*", "*.part",
     "*/.env", ".env", "*.pem", "*.key", "*/__pycache__/*", "*.pyc", "*/models/*", "*/dist/*", "*/build/*",
 ]
 SECRET_PATTERNS = {
