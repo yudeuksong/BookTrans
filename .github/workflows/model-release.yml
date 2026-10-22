@@ -1,0 +1,36 @@
+name: Model package release
+
+# Rebuilds booktrans-model-quickmt-en-ko.zip from the published model and releases it only
+# if its SHA-256 equals the value pinned in model-release/pack_quickmt_en_ko.py (and in BookTrans).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: quickmt-en-ko-a32fa39
+      FILE: booktrans-model-quickmt-en-ko.zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - run: pip install huggingface-hub==2.2.0
+      - name: Rebuild and verify the pinned SHA-256
+        run: python model-release/pack_quickmt_en_ko.py /tmp/work "dist/$FILE"
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum "$FILE" | tee SHA256SUMS
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: quickmt-en-ko (revision a32fa39) for BookTrans
+          body_path: model-release/RELEASE_BODY.md
+          files: |
+            dist/booktrans-model-quickmt-en-ko.zip
+            dist/SHA256SUMS
